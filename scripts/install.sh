@@ -1,18 +1,32 @@
 #!/usr/bin/env bash
-# install.sh — sets up a Paper Minecraft server and the playit.gg tunnel
-# inside a GitHub Codespace. Idempotent: safe to re-run.
+# install.sh — installs a Minecraft server of the chosen type and version,
+# plus the playit.gg tunnel. Idempotent: safe to re-run.
+#
+# Supported types: paper, vanilla, purpur, folia, fabric, forge
+#
+# Configuration (env vars):
+#   MC_TYPE     server type  (default: paper)
+#   MC_VERSION  MC version   (default: 1.21.4)
+#   HEAP_SIZE   JVM heap     (default: 2G, used by start.sh)
+#   MC_NONINTERACTIVE=1  skip the interactive menu
+#
+# Examples:
+#   bash scripts/install.sh                                  # interactive menu
+#   MC_TYPE=vanilla MC_VERSION=1.20.4 bash scripts/install.sh # vanilla, no menu
+#   MC_TYPE=forge MC_VERSION=1.21.4 bash scripts/install.sh   # Forge
+#   MC_TYPE=fabric MC_VERSION=1.21.4 bash scripts/install.sh  # Fabric
 
 set -euo pipefail
 
 # ---- Configuration ---------------------------------------------------------
-MC_VERSION="${MC_VERSION:-1.21.4}"            # Minecraft version
-HEAP_SIZE="${HEAP_SIZE:-2G}"                  # Default JVM heap (override at start)
+MC_TYPE="${MC_TYPE:-}"
+MC_VERSION="${MC_VERSION:-1.21.4}"
+HEAP_SIZE="${HEAP_SIZE:-2G}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVER_DIR="$PROJECT_DIR/server"
-PLAYIT_DIR="$HOME/playit"
-PLAYIT_BIN="$PLAYIT_DIR/playit"
-# ---------------------------------------------------------------------------
+PLAYIT_BIN="$HOME/playit/playit"
+PLAYIT_URL="https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-amd64"
 
 # ---- Helpers ---------------------------------------------------------------
 log()  { printf '\033[1;32m[setup]\033[0m %s\n' "$*"; }
@@ -29,68 +43,235 @@ cat <<'EOF'
  | |  | |  __/ (_| | \__ \ (_) | | | |____| |_) | |_| |
  |_|  |_|\___|\__,_|_|___/\___/|_| |_|    |_.__/ \__, |
                                                  |___/
-  Codespace Minecraft server (Paper, online-mode=false)
+  Codespace Minecraft server (multi-type, online-mode=false)
+  Supported types: paper, vanilla, purpur, folia, fabric, forge
 
 EOF
 
 need java
 need curl
 need python3
+need tar
+need unzip
 
 JAVA_VER=$(java -version 2>&1 | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
 JAVA_MAJOR=$(printf '%s' "$JAVA_VER" | cut -d. -f1)
 log "Java: $JAVA_VER"
 if [ "${JAVA_MAJOR:-0}" -lt 17 ]; then
-    err "Java 17+ required for Paper $MC_VERSION. Got $JAVA_VER."
+    err "Java 17+ required. Got $JAVA_VER. The dev container should ship Java 21."
     exit 1
 fi
 
-mkdir -p "$SERVER_DIR"
-
-# ---- 1. Paper server jar ---------------------------------------------------
-log "Looking up latest Paper build for Minecraft $MC_VERSION..."
-BUILDS_JSON=$(curl -fsSL \
-    "https://api.papermc.io/v2/projects/paper/versions/$MC_VERSION/builds") \
-    || { err "Paper API lookup failed. Check MC_VERSION='$MC_VERSION'."; exit 1; }
-
-LATEST_BUILD=$(printf '%s' "$BUILDS_JSON" | python3 -c '
-import sys, json
-data = json.load(sys.stdin)
-builds = data.get("builds") or []
-if not builds:
-    sys.exit("no builds for that version")
-print(builds[-1]["build"])
-') || { err "No builds found for $MC_VERSION. Try MC_VERSION=1.20.4 or 1.21.4."; exit 1; }
-
-JAR_NAME="paper-${MC_VERSION}-${LATEST_BUILD}.jar"
-JAR_PATH="$SERVER_DIR/$JAR_NAME"
-log "Latest build: $LATEST_BUILD"
-
-if [ -f "$JAR_PATH" ] && [ -s "$JAR_PATH" ]; then
-    log "Jar already present, skipping download."
-else
-    log "Downloading $JAR_NAME..."
-    curl -fL --retry 3 --retry-delay 2 -o "$JAR_PATH" \
-        "https://api.papermc.io/v2/projects/paper/versions/$MC_VERSION/builds/$LATEST_BUILD/downloads/$JAR_NAME"
-    log "Saved $(du -h "$JAR_PATH" | cut -f1) to $JAR_PATH"
+# ---- Interactive menu ------------------------------------------------------
+if [ -z "$MC_TYPE" ] && [ -t 0 ] && [ -z "${MC_NONINTERACTIVE:-}" ] && [ -z "${CI:-}" ]; then
+    echo "Which server type do you want?"
+    PS3="  > "
+    select t in paper vanilla purpur folia fabric forge; do
+        case "$t" in
+            "") echo "  Pick a number 1-6.";;
+            *)  MC_TYPE="$t"; break;;
+        esac
+    done
+    echo
+    read -r -p "Minecraft version [${MC_VERSION}]: " v
+    MC_VERSION="${v:-$MC_VERSION}"
+    echo
 fi
 
-# ---- 2. EULA ----------------------------------------------------------------
-log "Accepting Mojang EULA"
+MC_TYPE="${MC_TYPE:-paper}"
+MC_VERSION="${MC_VERSION:-1.21.4}"
+
+case "$MC_TYPE" in
+    paper|vanilla|purpur|folia|fabric|forge) ;;
+    *) err "Unknown server type: $MC_TYPE (try paper, vanilla, purpur, folia, fabric, forge)"; exit 1;;
+esac
+
+log "Selected: type=$MC_TYPE version=$MC_VERSION"
+
+# ---- Clean old install, preserving world data ------------------------------
+mkdir -p "$SERVER_DIR"
+EXISTING_TYPE=""
+[ -f "$SERVER_DIR/.server-type" ] && EXISTING_TYPE=$(cat "$SERVER_DIR/.server-type" || true)
+if [ -n "$EXISTING_TYPE" ] && [ "$EXISTING_TYPE" != "$MC_TYPE" ]; then
+    warn "Switching server type: $EXISTING_TYPE -> $MC_TYPE"
+    warn "Old jar/configs will be removed; world/ data is preserved."
+fi
+# Remove everything except world dirs, logs, and the .server-type marker
+find "$SERVER_DIR" -maxdepth 1 -mindepth 1 \
+    ! -name "world" \
+    ! -name "world_nether" \
+    ! -name "world_the_end" \
+    ! -name "logs" \
+    ! -name "crash-reports" \
+    ! -name ".server-type" \
+    -exec rm -rf {} + 2>/dev/null || true
+
+echo "$MC_TYPE" > "$SERVER_DIR/.server-type"
+
+# ---- Generic download helper ----------------------------------------------
+download_file() {
+    local url="$1" dest="$2"
+    if [ -f "$dest" ] && [ -s "$dest" ]; then
+        log "Already have $(basename "$dest"), skipping."
+        return 0
+    fi
+    log "Downloading $(basename "$dest")..."
+    if ! curl -fL --retry 3 --retry-delay 2 -o "$dest" "$url"; then
+        err "Download failed: $url"
+        return 1
+    fi
+    log "  saved $(du -h "$dest" | cut -f1)"
+}
+
+# ---- Type-specific installers ---------------------------------------------
+install_paper() {
+    local version="$MC_VERSION"
+    log "Looking up Paper $version..."
+    local builds_json
+    builds_json=$(curl -fsSL "https://api.papermc.io/v2/projects/paper/versions/$version/builds") \
+        || { err "Paper API unreachable."; return 1; }
+    local build
+    build=$(printf '%s' "$builds_json" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+b = d.get('builds') or []
+if not b: sys.exit('no builds for ${version}')
+print(b[-1]['build'])
+") || { err "No Paper builds for $version. Try 1.21.4, 1.20.4, 1.18.2."; return 1; }
+    local jar="paper-${version}-${build}.jar"
+    download_file \
+        "https://api.papermc.io/v2/projects/paper/versions/$version/builds/$build/downloads/$jar" \
+        "$SERVER_DIR/$jar"
+}
+
+install_vanilla() {
+    local version="$MC_VERSION"
+    log "Looking up vanilla $version..."
+    local manifest
+    manifest=$(curl -fsSL "https://launchermeta.mojang.com/mc/game/version_manifest.json") \
+        || { err "Mojang manifest unreachable."; return 1; }
+    local version_url
+    version_url=$(printf '%s' "$manifest" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for v in d['versions']:
+    if v['id'] == '${version}':
+        print(v['url']); break
+") || true
+    if [ -z "$version_url" ]; then
+        err "Vanilla $version not in Mojang manifest. Try 1.21.4, 1.20.4, 1.16.5."
+        return 1
+    fi
+    local jar_url
+    jar_url=$(curl -fsSL "$version_url" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(d['downloads']['server']['url'])
+")
+    download_file "$jar_url" "$SERVER_DIR/server.jar"
+}
+
+install_purpur() {
+    local version="$MC_VERSION"
+    log "Looking up Purpur $version..."
+    local data
+    data=$(curl -fsSL "https://api.purpurmc.org/v2/purpur/$version") \
+        || { err "Purpur API unreachable."; return 1; }
+    local build
+    build=$(printf '%s' "$data" | python3 -c "import sys, json; print(json.load(sys.stdin)['builds']['latest'])")
+    download_file \
+        "https://api.purpurmc.org/v2/purpur/$version/$build/download" \
+        "$SERVER_DIR/purpur-${version}-${build}.jar"
+}
+
+install_folia() {
+    local version="$MC_VERSION"
+    log "Looking up Folia $version..."
+    local builds_json
+    builds_json=$(curl -fsSL "https://api.papermc.io/v2/projects/folia/versions/$version/builds") \
+        || { err "Folia API unreachable."; return 1; }
+    local build
+    build=$(printf '%s' "$builds_json" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+b = d.get('builds') or []
+if not b: sys.exit('no builds for ${version}')
+print(b[-1]['build'])
+") || { err "No Folia builds for $version. Try 1.21.4, 1.20.4."; return 1; }
+    local jar="folia-${version}-${build}.jar"
+    download_file \
+        "https://api.papermc.io/v2/projects/folia/versions/$version/builds/$build/downloads/$jar" \
+        "$SERVER_DIR/$jar"
+}
+
+install_fabric() {
+    local version="$MC_VERSION"
+    log "Looking up Fabric installer..."
+    local installer_url
+    installer_url=$(curl -fsSL "https://meta.fabricmc.net/v2/versions/installer" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+v = d[0]['version']
+print(f'https://maven.fabricmc.net/net/fabricmc/fabric-installer/{v}/fabric-installer-{v}.jar')
+") || { err "Fabric installer lookup failed."; return 1; }
+    download_file "$installer_url" "$SERVER_DIR/fabric-installer.jar" || return 1
+
+    log "Running Fabric installer for MC $version (this may take a minute)..."
+    ( cd "$SERVER_DIR" && java -jar fabric-installer.jar server \
+        -mcversion "$version" -dir "$SERVER_DIR" -download ) \
+        || { err "Fabric installer failed."; return 1; }
+    rm -f "$SERVER_DIR/fabric-installer.jar"
+}
+
+install_forge() {
+    local version="$MC_VERSION"
+    log "Looking up Forge for MC $version..."
+    local metadata
+    metadata=$(curl -fsSL "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml") \
+        || { err "Forge maven metadata unreachable."; return 1; }
+    local forge_version
+    forge_version=$(printf '%s' "$metadata" | python3 -c "
+import sys, re
+content = sys.stdin.read()
+prefix = '${version}-'
+matches = re.findall(r'<version>' + re.escape(prefix) + r'([^<]+)</version>', content)
+if not matches: sys.exit('no forge versions for ${version}')
+def parse(v):
+    return tuple(int(x) if x.isdigit() else x for x in re.split(r'[.-]', v))
+print(prefix + sorted(matches, key=parse)[-1])
+") || { err "No Forge build for $version. Try 1.21.4, 1.20.4, 1.16.5."; return 1; }
+    log "Forge version: $forge_version"
+    local installer_url="https://maven.minecraftforge.net/net/minecraftforge/forge/${forge_version}/forge-${forge_version}-installer.jar"
+    download_file "$installer_url" "$SERVER_DIR/forge-installer.jar" || return 1
+
+    log "Running Forge installer (this may take a minute)..."
+    ( cd "$SERVER_DIR" && java -jar forge-installer.jar --installServer ) \
+        || { err "Forge installer failed."; return 1; }
+    rm -f "$SERVER_DIR/forge-installer.jar"
+}
+
+# ---- Dispatch --------------------------------------------------------------
+case "$MC_TYPE" in
+    paper)   install_paper   || { err "Paper install failed.";   exit 1; };;
+    vanilla) install_vanilla || { err "Vanilla install failed."; exit 1; };;
+    purpur)  install_purpur  || { err "Purpur install failed.";  exit 1; };;
+    folia)   install_folia   || { err "Folia install failed.";   exit 1; };;
+    fabric)  install_fabric  || { err "Fabric install failed.";  exit 1; };;
+    forge)   install_forge   || { err "Forge install failed.";   exit 1; };;
+esac
+
+# ---- Common: EULA ----------------------------------------------------------
 cat > "$SERVER_DIR/eula.txt" <<EULA
 eula=true
 #Accepted by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EULA
 
-# ---- 3. server.properties --------------------------------------------------
-# Online-mode is set to false so friends without paid Mojang accounts can
-# join using any username. Keep the rest at sane defaults for a small group.
+# ---- Common: server.properties --------------------------------------------
 PROPS_FILE="$SERVER_DIR/server.properties"
 if [ ! -f "$PROPS_FILE" ] || ! grep -q '^online-mode=' "$PROPS_FILE"; then
-    log "Writing server.properties"
+    log "Writing server.properties (online-mode=false)"
     cat > "$PROPS_FILE" <<PROPS
 #Minecraft server properties — generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
-#Tweaked for a friend group on GitHub Codespace.
 allow-flight=true
 allow-nether=true
 broadcast-console-to-ops=true
@@ -148,33 +329,28 @@ view-distance=10
 white-list=false
 PROPS
 else
-    log "server.properties already exists, leaving it alone."
-    # Make sure online-mode is false even if user edited it
-    if grep -q '^online-mode=true' "$PROPS_FILE"; then
-        warn "online-mode=true in server.properties — switching to false for friend access."
-        sed -i 's/^online-mode=true/online-mode=false/' "$PROPS_FILE"
-    fi
+    log "server.properties exists, leaving alone (forcing online-mode=false)"
+    sed -i 's/^online-mode=true/online-mode=false/' "$PROPS_FILE"
 fi
 
-# ---- 4. Empty ops/usercache so the server doesn't choke on first start ----
-[ -f "$SERVER_DIR/ops.json" ]    || printf '[]\n' > "$SERVER_DIR/ops.json"
-[ -f "$SERVER_DIR/usercache.json" ] || printf '[]\n' > "$SERVER_DIR/usercache.json"
-[ -f "$SERVER_DIR/banned-players.json" ] || printf '[]\n' > "$SERVER_DIR/banned-players.json"
-[ -f "$SERVER_DIR/banned-ips.json" ]     || printf '[]\n' > "$SERVER_DIR/banned-ips.json"
-[ -f "$SERVER_DIR/whitelist.json" ]      || printf '[]\n' > "$SERVER_DIR/whitelist.json"
+# ---- Common: empty state files so first start doesn't choke ----------------
+[ -f "$SERVER_DIR/ops.json" ]              || printf '[]\n' > "$SERVER_DIR/ops.json"
+[ -f "$SERVER_DIR/usercache.json" ]        || printf '[]\n' > "$SERVER_DIR/usercache.json"
+[ -f "$SERVER_DIR/banned-players.json" ]   || printf '[]\n' > "$SERVER_DIR/banned-players.json"
+[ -f "$SERVER_DIR/banned-ips.json" ]       || printf '[]\n' > "$SERVER_DIR/banned-ips.json"
+[ -f "$SERVER_DIR/whitelist.json" ]        || printf '[]\n' > "$SERVER_DIR/whitelist.json"
 
-# ---- 5. playit.gg tunnel ---------------------------------------------------
-log "Installing playit.gg tunnel (free, made for game servers)..."
-mkdir -p "$PLAYIT_DIR"
+# ---- Common: playit.gg tunnel ---------------------------------------------
+log "Installing playit.gg tunnel..."
+mkdir -p "$(dirname "$PLAYIT_BIN")"
 if [ -x "$PLAYIT_BIN" ]; then
     log "playit already installed."
 else
-    log "Downloading playit binary..."
-    if ! curl -fL --retry 3 -o "$PLAYIT_BIN" \
-            "https://github.com/playit-cloud/playit-minecraft/releases/latest/download/playit-linux-amd64"; then
-        warn "playit download failed. The server will still start, but you will need a tunnel."
-    else
+    if curl -fL --retry 3 -o "$PLAYIT_BIN" "$PLAYIT_URL"; then
         chmod +x "$PLAYIT_BIN"
+        log "playit installed at $PLAYIT_BIN"
+    else
+        warn "playit download failed. Server will still start, but you'll need a tunnel."
     fi
 fi
 
@@ -183,16 +359,13 @@ cat <<EOF
 
 $(printf '\033[1;32m')=== Setup complete ===$(printf '\033[0m')
 
-  Server jar:  $JAR_PATH
-  Server dir:  $SERVER_DIR
-  Heap:        $HEAP_SIZE (override with HEAP_SIZE=4G bash scripts/start.sh)
-  Playit bin:  $PLAYIT_BIN
+  Type:     $MC_TYPE
+  Version:  $MC_VERSION
+  Dir:      $SERVER_DIR
+  Heap:     $HEAP_SIZE (override with HEAP_SIZE=4G bash scripts/start.sh)
+  Playit:   $PLAYIT_BIN
+  online-mode = false  (any username — whitelist is your real protection)
 
-  online-mode = false  (any username works — for trusted friends only)
-
-Next steps:
-  1) Start the server :  bash scripts/start.sh
-  2) Claim the tunnel :  visit the URL playit prints on first start
-  3) Share the address:  send your friends the playit host:port
-
+Next:
+  bash scripts/start.sh
 EOF

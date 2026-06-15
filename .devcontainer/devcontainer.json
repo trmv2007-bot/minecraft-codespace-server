@@ -1,12 +1,12 @@
 {
-  "name": "Minecraft Server (Paper, online-mode=false)",
+  "name": "Minecraft Server (multi-type, online-mode=false)",
   "image": "mcr.microsoft.com/devcontainers/java:21-bookworm",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
       "installZsh": false
     }
   },
-  "postCreateCommand": "bash scripts/install.sh",
+  "postCreateCommand": "MC_NONINTERACTIVE=1 bash scripts/install.sh",
   "forwardPorts": [25565],
   "portsAttributes": {
     "25565": {
