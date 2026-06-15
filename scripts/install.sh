@@ -34,33 +34,40 @@ warn() { printf '\033[1;33m[setup]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[1;31m[setup]\033[0m %s\n' "$*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || { err "Missing required command: $1"; exit 1; }; }
 
-# The Microsoft Java dev container ships python3-minimal, which has the
-# python3 binary but NOT the _json C extension. We need json to parse the
-# Paper/Purpur/Folia/Vanilla/Fabric APIs, so install the full python3 here.
-need_python_json() {
-    if python3 -c "import json" 2>/dev/null; then return 0; fi
-    warn "python3 is missing the 'json' module; trying to install it..."
+# The Microsoft Java dev container ships a python3 without the _json C
+# extension. Rather than fight Python packaging, we use jq for JSON parsing
+# — a single small binary that installs cleanly via apt.
+need_jq() {
+    if command -v jq >/dev/null 2>&1; then return 0; fi
+    warn "jq not found; trying to install it..."
     if command -v apt-get >/dev/null 2>&1; then
         local SUDO=""
         if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
-        if $SUDO apt-get install -y -qq python3 >/dev/null 2>&1; then
-            log "Installed python3 via apt."
+        if $SUDO apt-get install -y -qq jq >/dev/null 2>&1; then
+            log "Installed jq via apt."
         else
-            err "apt-get install python3 failed. Run: sudo apt-get install -y python3"
+            err "apt-get install jq failed. Run: sudo apt-get install -y jq"
             return 1
         fi
     elif command -v apk >/dev/null 2>&1; then
-        if apk add --no-cache python3 >/dev/null 2>&1; then
-            log "Installed python3 via apk."
+        if apk add --no-cache jq >/dev/null 2>&1; then
+            log "Installed jq via apk."
         else
-            err "apk add python3 failed."
+            err "apk add jq failed."
+            return 1
+        fi
+    elif command -v dnf >/dev/null 2>&1; then
+        if dnf install -y -q jq >/dev/null 2>&1; then
+            log "Installed jq via dnf."
+        else
+            err "dnf install jq failed."
             return 1
         fi
     else
-        err "No supported package manager. Install python3 with json manually."
+        err "No supported package manager. Install jq manually."
         return 1
     fi
-    python3 -c "import json" 2>/dev/null
+    command -v jq >/dev/null 2>&1
 }
 # ---------------------------------------------------------------------------
 
@@ -79,7 +86,7 @@ EOF
 
 need java
 need curl
-need_python_json
+need_jq
 need tar
 need unzip
 
@@ -160,13 +167,11 @@ install_paper() {
     builds_json=$(curl -fsSL "https://api.papermc.io/v2/projects/paper/versions/$version/builds") \
         || { err "Paper API unreachable."; return 1; }
     local build
-    build=$(printf '%s' "$builds_json" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-b = d.get('builds') or []
-if not b: sys.exit('no builds for ${version}')
-print(b[-1]['build'])
-") || { err "No Paper builds for $version. Try 1.21.4, 1.20.4, 1.18.2."; return 1; }
+    build=$(printf '%s' "$builds_json" | jq -r '.builds[-1].build')
+    if [ -z "$build" ] || [ "$build" = "null" ]; then
+        err "No Paper builds for $version. Try 1.21.4, 1.20.4, 1.18.2."
+        return 1
+    fi
     local jar="paper-${version}-${build}.jar"
     download_file \
         "https://api.papermc.io/v2/projects/paper/versions/$version/builds/$build/downloads/$jar" \
@@ -180,23 +185,17 @@ install_vanilla() {
     manifest=$(curl -fsSL "https://launchermeta.mojang.com/mc/game/version_manifest.json") \
         || { err "Mojang manifest unreachable."; return 1; }
     local version_url
-    version_url=$(printf '%s' "$manifest" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for v in d['versions']:
-    if v['id'] == '${version}':
-        print(v['url']); break
-") || true
-    if [ -z "$version_url" ]; then
+    version_url=$(printf '%s' "$manifest" | jq -r --arg v "$version" '.versions[] | select(.id == $v) | .url')
+    if [ -z "$version_url" ] || [ "$version_url" = "null" ]; then
         err "Vanilla $version not in Mojang manifest. Try 1.21.4, 1.20.4, 1.16.5."
         return 1
     fi
     local jar_url
-    jar_url=$(curl -fsSL "$version_url" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d['downloads']['server']['url'])
-")
+    jar_url=$(curl -fsSL "$version_url" | jq -r '.downloads.server.url')
+    if [ -z "$jar_url" ] || [ "$jar_url" = "null" ]; then
+        err "No server jar in version metadata for $version."
+        return 1
+    fi
     download_file "$jar_url" "$SERVER_DIR/server.jar"
 }
 
@@ -207,7 +206,11 @@ install_purpur() {
     data=$(curl -fsSL "https://api.purpurmc.org/v2/purpur/$version") \
         || { err "Purpur API unreachable."; return 1; }
     local build
-    build=$(printf '%s' "$data" | python3 -c "import sys, json; print(json.load(sys.stdin)['builds']['latest'])")
+    build=$(printf '%s' "$data" | jq -r '.builds.latest')
+    if [ -z "$build" ] || [ "$build" = "null" ]; then
+        err "No Purpur build for $version. Try 1.21.4, 1.20.4."
+        return 1
+    fi
     download_file \
         "https://api.purpurmc.org/v2/purpur/$version/$build/download" \
         "$SERVER_DIR/purpur-${version}-${build}.jar"
@@ -220,13 +223,11 @@ install_folia() {
     builds_json=$(curl -fsSL "https://api.papermc.io/v2/projects/folia/versions/$version/builds") \
         || { err "Folia API unreachable."; return 1; }
     local build
-    build=$(printf '%s' "$builds_json" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-b = d.get('builds') or []
-if not b: sys.exit('no builds for ${version}')
-print(b[-1]['build'])
-") || { err "No Folia builds for $version. Try 1.21.4, 1.20.4."; return 1; }
+    build=$(printf '%s' "$builds_json" | jq -r '.builds[-1].build')
+    if [ -z "$build" ] || [ "$build" = "null" ]; then
+        err "No Folia builds for $version. Try 1.21.4, 1.20.4."
+        return 1
+    fi
     local jar="folia-${version}-${build}.jar"
     download_file \
         "https://api.papermc.io/v2/projects/folia/versions/$version/builds/$build/downloads/$jar" \
@@ -236,13 +237,13 @@ print(b[-1]['build'])
 install_fabric() {
     local version="$MC_VERSION"
     log "Looking up Fabric installer..."
-    local installer_url
-    installer_url=$(curl -fsSL "https://meta.fabricmc.net/v2/versions/installer" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-v = d[0]['version']
-print(f'https://maven.fabricmc.net/net/fabricmc/fabric-installer/{v}/fabric-installer-{v}.jar')
-") || { err "Fabric installer lookup failed."; return 1; }
+    local installer_version
+    installer_version=$(curl -fsSL "https://meta.fabricmc.net/v2/versions/installer" | jq -r '.[0].version')
+    if [ -z "$installer_version" ] || [ "$installer_version" = "null" ]; then
+        err "Fabric installer version lookup failed."
+        return 1
+    fi
+    local installer_url="https://maven.fabricmc.net/net/fabricmc/fabric-installer/${installer_version}/fabric-installer-${installer_version}.jar"
     download_file "$installer_url" "$SERVER_DIR/fabric-installer.jar" || return 1
 
     log "Running Fabric installer for MC $version (this may take a minute)..."
@@ -258,6 +259,8 @@ install_forge() {
     local metadata
     metadata=$(curl -fsSL "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml") \
         || { err "Forge maven metadata unreachable."; return 1; }
+    # Forge uses XML, not JSON; keep the Python parser just for this one call
+    # (it works for the simple regex extraction even when _json is missing).
     local forge_version
     forge_version=$(printf '%s' "$metadata" | python3 -c "
 import sys, re
@@ -268,7 +271,11 @@ if not matches: sys.exit('no forge versions for ${version}')
 def parse(v):
     return tuple(int(x) if x.isdigit() else x for x in re.split(r'[.-]', v))
 print(prefix + sorted(matches, key=parse)[-1])
-") || { err "No Forge build for $version. Try 1.21.4, 1.20.4, 1.16.5."; return 1; }
+" 2>/dev/null) || true
+    if [ -z "$forge_version" ]; then
+        err "No Forge build for $version. Try 1.21.4, 1.20.4, 1.16.5."
+        return 1
+    fi
     log "Forge version: $forge_version"
     local installer_url="https://maven.minecraftforge.net/net/minecraftforge/forge/${forge_version}/forge-${forge_version}-installer.jar"
     download_file "$installer_url" "$SERVER_DIR/forge-installer.jar" || return 1

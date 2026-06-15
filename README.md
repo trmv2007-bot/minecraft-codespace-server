@@ -164,14 +164,11 @@ the tunnel alive (rare), open a second terminal and run
 
 ## Troubleshooting
 
-- **`ModuleNotFoundError: No module named 'json'`** — the Java dev
-  container ships a stripped-down `python3-minimal` that lacks the
-  `_json` C extension. `install.sh` will auto-install the full `python3`
-  via apt on first run, so just re-run it. If that fails, run manually:
-  `sudo apt-get install -y python3` and re-try. (The dev container
-  `devcontainer.json` already includes the `python:1` feature for new
-  Codespaces — you only hit this on older Codespaces that were built
-  before that change.)
+- **`ModuleNotFoundError: No module named 'json'`** — fixed in the
+  latest version of this repo. The Java dev container's `python3-minimal`
+  lacks the `_json` C extension, so `install.sh` no longer depends on
+  Python — it uses `jq` instead. Pull the latest (`git pull`) and re-run
+  `bash scripts/install.sh`; it'll `apt-get install jq` automatically.
 - **"No server jar found" / "no run.sh"** — install.sh didn't complete.
   From the Codespace root: `bash scripts/install.sh`. Look at the error
   message; the most common cause is the version not existing for that
