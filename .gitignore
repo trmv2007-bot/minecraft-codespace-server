@@ -1,0 +1,17 @@
+# Server runtime (downloaded jars, worlds, logs, generated state)
+server/
+playit.log
+playit-credentials.txt
+server.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+*.swp
+*.swo
+
+# Don't ignore the devcontainer config
+!.devcontainer/
