@@ -43,44 +43,49 @@ jobs:
           p.write_text(s, encoding="utf-8")
 
           # Minecraft 26.3 migration fixes found by the first real compile.
+          import re
           root = Path("src/main/java/com/friendswine")
+
           # Block codecs were removed in 26.3.
           p = root / "DollBlock.java"
           s = p.read_text(encoding="utf-8")
-          s = s.replace("import com.mojang.serialization.MapCodec;\\n", "")
-          s = s.replace("    public static final MapCodec<DollBlock> CODEC = simpleCodec(DollBlock::new);\\n", "")
-          s = s.replace("    @Override\\n    public MapCodec<DollBlock> codec() {\\n        return CODEC;\\n    }\\n\\n", "")
+          s = "\n".join(line for line in s.splitlines() if line.strip() not in {
+              "import com.mojang.serialization.MapCodec;",
+              "public static final MapCodec<DollBlock> CODEC = simpleCodec(DollBlock::new);"
+          }) + "\n"
+          s = re.sub(r"\n    @Override\n    public MapCodec<DollBlock> codec\(\) \{\n        return CODEC;\n    \}\n", "\n", s)
           p.write_text(s, encoding="utf-8")
 
-          # PoseStack now accepts a Matrix4fc/Transformation rather than Quaternionf.
+          # PoseStack now accepts Matrix4fc/Transformation rather than Quaternionf.
           p = root / "client" / "DollRenderer.java"
           s = p.read_text(encoding="utf-8")
-          s = s.replace("import net.minecraft.client.renderer.MultiBufferSource;\\n", "")
-          s = s.replace("import com.mojang.math.Axis;\\n", "import com.mojang.math.Axis;\\nimport org.joml.Matrix4f;\\n")
+          lines = [line for line in s.splitlines() if line.strip() != "import net.minecraft.client.renderer.MultiBufferSource;"]
+          if "import org.joml.Matrix4f;" not in lines:
+              lines.insert(lines.index("import com.mojang.math.Axis;") + 1, "import org.joml.Matrix4f;")
+          s = "\n".join(lines) + "\n"
           s = s.replace("pose.mulPose(Axis.YP.rotationDegrees(state.yaw))", "pose.mulPose(new Matrix4f().rotation(Axis.YP.rotationDegrees(state.yaw)))")
           s = s.replace("pose.mulPose(Axis.YP.rotationDegrees(JellyAnimation.angle(animation.rotationSeconds() * ClientConfig.ROTATION_SPEED.get().doubleValue())))", "pose.mulPose(new Matrix4f().rotation(Axis.YP.rotationDegrees(JellyAnimation.angle(animation.rotationSeconds() * ClientConfig.ROTATION_SPEED.get().doubleValue()))))")
           p.write_text(s, encoding="utf-8")
 
           p = root / "client" / "PartyGuestRenderer.java"
           s = p.read_text(encoding="utf-8")
-          s = s.replace("import com.mojang.math.Axis;\\n", "import com.mojang.math.Axis;\\nimport org.joml.Matrix4f;\\n")
-          old = """    @Override public boolean shouldRender(PartyGuestEntity entity, Frustum frustum, double camX, double camY, double camZ) {
-          double size = Math.max(1, ClientConfig.creatureMax(entity.variant()));
-          AABB bounds = new AABB(entity.getX() - size / 2, entity.getY(), entity.getZ() - size / 2,
-                  entity.getX() + size / 2, entity.getY() + size, entity.getZ() + size / 2);
-          return entity.distanceToSqr(camX, camY, camZ) <= (128 + size) * (128 + size) && frustum.isVisible(bounds.inflate(0.5));
-      }"""
-          new = """    @Override public boolean shouldRender(State state, Frustum frustum, double camX, double camY, double camZ) {
-          GuestVariant variant = state.variant == null ? GuestVariant.KASUMI : state.variant;
-          double size = Math.max(1, ClientConfig.creatureMax(variant));
-          AABB bounds = new AABB(state.x - size / 2, state.y, state.z - size / 2,
-                  state.x + size / 2, state.y + size, state.z + size / 2);
-          double dx = state.x - camX, dy = state.y - camY, dz = state.z - camZ;
-          return dx * dx + dy * dy + dz * dz <= (128 + size) * (128 + size) && frustum.isVisible(bounds.inflate(0.5));
-      }"""
-          if old not in s:
+          lines = s.splitlines()
+          if "import org.joml.Matrix4f;" not in lines:
+              lines.insert(lines.index("import com.mojang.math.Axis;") + 1, "import org.joml.Matrix4f;")
+          s = "\n".join(lines) + "\n"
+          new_method = "\n".join([
+              "    @Override public boolean shouldRender(State state, Frustum frustum, double camX, double camY, double camZ) {",
+              "        GuestVariant variant = state.variant == null ? GuestVariant.KASUMI : state.variant;",
+              "        double size = Math.max(1, ClientConfig.creatureMax(variant));",
+              "        AABB bounds = new AABB(state.x - size / 2, state.y, state.z - size / 2,",
+              "                state.x + size / 2, state.y + size, state.z + size / 2);",
+              "        double dx = state.x - camX, dy = state.y - camY, dz = state.z - camZ;",
+              "        return dx * dx + dy * dy + dz * dz <= (128 + size) * (128 + size) && frustum.isVisible(bounds.inflate(0.5));",
+              "    }"
+          ])
+          s, count = re.subn(r"    @Override public boolean shouldRender\(PartyGuestEntity entity, Frustum frustum, double camX, double camY, double camZ\) \{.*?\n    \}", new_method, s, count=1, flags=re.S)
+          if count != 1:
               raise SystemExit("Could not locate PartyGuestRenderer.shouldRender to port")
-          s = s.replace(old, new)
           s = s.replace("pose.mulPose(Axis.YP.rotationDegrees(GuestAnimation.facingYaw(camera.pos.x - state.x, camera.pos.z - state.z, camera.yRot)))", "pose.mulPose(new Matrix4f().rotation(Axis.YP.rotationDegrees(GuestAnimation.facingYaw(camera.pos.x - state.x, camera.pos.z - state.z, camera.yRot))))")
           p.write_text(s, encoding="utf-8")
 
