@@ -1,0 +1,77 @@
+name: Friendswine 26.3 port build
+
+on:
+  push:
+    branches:
+      - "tmp/friendswine-26.3-port"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout trigger branch
+        uses: actions/checkout@v4
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Fetch and prepare Friendswine source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/jiaotan798/friendswine.git upstream
+          cd upstream/ports/fabric-26.1.2
+          sed -i "s/version '1.15.5'/version '1.18.4'/" build.gradle
+          sed -i 's/mod_version=0.1.18/mod_version=0.1.18-26.3-port1/' gradle.properties
+          sed -i 's/minecraft_version=26.1.2/minecraft_version=26.3/' gradle.properties
+          sed -i 's/loader_version=0.19.4/loader_version=0.19.5/' gradle.properties
+          sed -i 's/fabric_api_version=0.149.0+26.1.2/fabric_api_version=0.164.0+26.3/' gradle.properties
+          sed -i 's/gradle-9.4.0-bin/gradle-9.6.0-bin/' gradle/wrapper/gradle-wrapper.properties
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/main/resources/fabric.mod.json")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace('"minecraft": "26.1.2"', '"minecraft": "26.3"')
+          s = s.replace('">=0.149.0+26.1.2"', '">=0.164.0+26.3"')
+          p.write_text(s, encoding="utf-8")
+          PY
+          cat gradle.properties
+          grep -nE '"minecraft"|"fabric-api"|fabricloader|version' src/main/resources/fabric.mod.json
+
+      - name: Compile mod JAR (capture all diagnostics)
+        id: build
+        shell: bash
+        run: |
+          set +e
+          cd upstream/ports/fabric-26.1.2
+          ./gradlew --no-daemon clean jar --stacktrace 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: friendswine-26.3-build-diagnostics
+          path: |
+            upstream/ports/fabric-26.1.2/build.log
+            upstream/ports/fabric-26.1.2/build/reports/**
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Upload JAR
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: friendswine-26.3-jar
+          path: upstream/ports/fabric-26.1.2/build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 7
