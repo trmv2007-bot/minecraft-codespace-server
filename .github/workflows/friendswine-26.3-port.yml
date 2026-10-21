@@ -33,7 +33,7 @@ jobs:
           sed -i 's/minecraft_version=26.1.2/minecraft_version=26.3/' gradle.properties
           sed -i 's/loader_version=0.19.4/loader_version=0.19.5/' gradle.properties
           sed -i 's/fabric_api_version=0.149.0+26.1.2/fabric_api_version=0.164.0+26.3/' gradle.properties
-          sed -i 's/gradle-9.4.0-bin/gradle-9.6.0-bin/' gradle/wrapper/gradle-wrapper.properties
+          sed -i 's/gradle-9.4.0-bin/gradle-9.7.1-bin/' gradle/wrapper/gradle-wrapper.properties
           python3 - <<'PY'
           from pathlib import Path
           p = Path("src/main/resources/fabric.mod.json")
