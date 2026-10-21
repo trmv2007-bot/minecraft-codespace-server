@@ -74,13 +74,11 @@ jobs:
               lines.insert(lines.index("import com.mojang.math.Axis;") + 1, "import org.joml.Matrix4f;")
           s = "\n".join(lines) + "\n"
           new_method = "\n".join([
-              "    @Override public boolean shouldRender(State state, Frustum frustum, double camX, double camY, double camZ) {",
-              "        GuestVariant variant = state.variant == null ? GuestVariant.KASUMI : state.variant;",
-              "        double size = Math.max(1, ClientConfig.creatureMax(variant));",
-              "        AABB bounds = new AABB(state.x - size / 2, state.y, state.z - size / 2,",
-              "                state.x + size / 2, state.y + size, state.z + size / 2);",
-              "        double dx = state.x - camX, dy = state.y - camY, dz = state.z - camZ;",
-              "        return dx * dx + dy * dy + dz * dz <= (128 + size) * (128 + size) && frustum.isVisible(bounds.inflate(0.5));",
+              "    @Override public boolean shouldRender(PartyGuestEntity entity, Frustum frustum, double camX, double camY, double camZ, float partialTicks) {",
+              "        double size = Math.max(1, ClientConfig.creatureMax(entity.variant()));",
+              "        AABB bounds = new AABB(entity.getX() - size / 2, entity.getY(), entity.getZ() - size / 2,",
+              "                entity.getX() + size / 2, entity.getY() + size, entity.getZ() + size / 2);",
+              "        return entity.distanceToSqr(camX, camY, camZ) <= (128 + size) * (128 + size) && frustum.isVisible(bounds.inflate(0.5));",
               "    }"
           ])
           s, count = re.subn(r"    @Override public boolean shouldRender\(PartyGuestEntity entity, Frustum frustum, double camX, double camY, double camZ\) \{.*?\n    \}", new_method, s, count=1, flags=re.S)
